@@ -14,6 +14,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
 
 jobs:
   build:
@@ -23,44 +24,47 @@ jobs:
       - name: Checkout the code
         uses: actions/checkout@v4
       
-      - name: Set up JDK 17 (Oracle)
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'oracle'
+          distribution: 'temurin'  # 使用 Temurin 更稳定
       
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        
-      - name: Install specific SDK components
+      
+      - name: Install SDK components
         run: |
-          # 更新 sdkmanager
-          yes | sdkmanager --update || true
-          
-          # 安装所需的组件（使用正确的包名格式）
-          echo "安装 Android Platform 36..."
-          yes | sdkmanager "platforms;android-36" || true
-          
-          echo "安装 Build Tools 36.0.0..."
-          yes | sdkmanager "build-tools;36.0.0" || true
-          
-          echo "安装 Platform Tools..."
-          yes | sdkmanager "platform-tools" || true
-          
-          # 接受所有许可证
           yes | sdkmanager --licenses || true
-          
-          echo "已安装的 SDK 组件:"
-          sdkmanager --list | grep -E "platforms|build-tools|platform-tools"
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" || true
       
       - id: get-project
         name: Get project name
         run: |
           PROJECT=$(cat project-to-build)
           echo "PROJECT=$PROJECT" >> $GITHUB_OUTPUT
+          echo "项目地址: $PROJECT"
       
       - name: Clone project
         run: git clone --depth=1 ${{ steps.get-project.outputs.PROJECT }} project
+      
+      - name: Fix Gradle version (downgrade to 8.7)
+        working-directory: ./project
+        run: |
+          # 检查并降级 Gradle 版本
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "原始 Gradle 配置:"
+            cat gradle/wrapper/gradle-wrapper.properties
+            echo ""
+            echo "降级 Gradle 到 8.7..."
+            sed -i 's|gradle-.*-bin.zip|gradle-8.7-bin.zip|g' gradle/wrapper/gradle-wrapper.properties
+            echo "修改后的配置:"
+            cat gradle/wrapper/gradle-wrapper.properties
+          else
+            echo "未找到 gradle-wrapper.properties，将创建默认配置"
+            mkdir -p gradle/wrapper
+            echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip" > gradle/wrapper/gradle-wrapper.properties
+          fi
       
       - name: Configure build.gradle for arm64-v8a only
         working-directory: ./project
@@ -68,7 +72,9 @@ jobs:
           APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
           if [ -z "$APP_BUILD_GRADLE" ]; then
-            echo "找不到 app/build.gradle 文件"
+            echo "警告: 找不到 app/build.gradle 文件"
+            echo "尝试查找所有 build.gradle 文件:"
+            find . -name "build.gradle*" -type f
             exit 1
           fi
           
@@ -88,36 +94,32 @@ jobs:
           else
             echo "abiFilters 配置已存在"
           fi
-          
-          echo "=== 修改后的配置 ==="
-          grep -A 5 "abiFilters" $APP_BUILD_GRADLE || echo "未找到"
       
-      - name: Configure build for release
+      - name: Configure release build optimizations
         working-directory: ./project
         if: github.event.inputs.build_type == 'release'
         run: |
           APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
-          # 启用资源压缩和代码混淆
           if [[ "$APP_BUILD_GRADLE" == *.kts ]]; then
-            # Kotlin DSL
-            sed -i 's/minifyEnabled = false/minifyEnabled = true/g' $APP_BUILD_GRADLE
-            sed -i 's/shrinkResources = false/shrinkResources = true/g' $APP_BUILD_GRADLE
+            sed -i 's/minifyEnabled = false/minifyEnabled = true/g' $APP_BUILD_GRADLE || true
+            sed -i 's/shrinkResources = false/shrinkResources = true/g' $APP_BUILD_GRADLE || true
           else
-            # Groovy DSL
-            sed -i 's/minifyEnabled false/minifyEnabled true/g' $APP_BUILD_GRADLE
-            sed -i 's/shrinkResources false/shrinkResources true/g' $APP_BUILD_GRADLE
+            sed -i 's/minifyEnabled false/minifyEnabled true/g' $APP_BUILD_GRADLE || true
+            sed -i 's/shrinkResources false/shrinkResources true/g' $APP_BUILD_GRADLE || true
           fi
-          
-          echo "已为 release 构建启用资源压缩"
+          echo "已为 release 构建启用优化"
       
       - name: Setup Gradle wrapper
         working-directory: ./project
         run: |
           if [ ! -f "gradlew" ]; then
+            echo "生成 gradle wrapper..."
             gradle wrapper
           fi
           chmod +x gradlew
+          # 更新 gradle-wrapper.jar
+          ./gradlew wrapper --gradle-version 8.7 || true
       
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -135,17 +137,29 @@ jobs:
         run: |
           echo "=== 构建环境信息 ==="
           java -version
-          echo "Android SDK 路径: $ANDROID_HOME"
-          sdkmanager --list | head -20
-          ./gradlew --version
+          echo "Gradle 版本:"
+          ./gradlew --version || {
+            echo "Gradle wrapper 可能损坏，重新生成..."
+            gradle wrapper --gradle-version 8.7
+            chmod +x gradlew
+            ./gradlew --version
+          }
           
-          echo "开始构建 ${{ github.event.inputs.build_type }} APK"
-          ./gradlew assemble${{ github.event.inputs.build_type }} --stacktrace --no-daemon
+          echo ""
+          echo "开始构建 ${{ github.event.inputs.build_type }} APK (arm64-v8a only)"
+          echo ""
           
+          # 使用更保守的 JVM 参数
+          ./gradlew assemble${{ github.event.inputs.build_type }} \
+            --stacktrace \
+            --no-daemon \
+            -Dorg.gradle.jvmargs="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8"
+          
+          echo ""
           echo "=== 生成的 APK 文件 ==="
           find . -name "*.apk" -type f | while read apk; do
             size=$(du -h "$apk" | cut -f1)
-            echo "$apk - 大小: $size"
+            echo "📦 $apk - 大小: $size"
           done
       
       - name: Rename APK
@@ -157,7 +171,13 @@ jobs:
             APK_DIR=$(dirname "$APK_FILE")
             NEW_NAME="$APK_DIR/app-arm64-v8a-${{ github.event.inputs.build_type }}.apk"
             mv "$APK_FILE" "$NEW_NAME"
-            echo "APK 已重命名为: $NEW_NAME"
+            echo "✅ APK 已重命名为: $NEW_NAME"
+            echo "APK_PATH=$NEW_NAME" >> $GITHUB_ENV
+          else
+            echo "❌ 未找到 APK 文件"
+            # 列出构建输出目录
+            echo "构建输出目录内容:"
+            find app/build/outputs -type f 2>/dev/null || echo "无输出"
           fi
       
       - name: Upload APK
@@ -166,35 +186,7 @@ jobs:
           name: app-arm64-v8a-${{ github.event.inputs.build_type }}
           path: ./project/**/app-arm64-v8a-*.apk
           retention-days: 7
-      
-      - name: Generate size report
-        working-directory: ./project
-        run: |
-          echo "# APK 体积分析报告" > size_report.md
-          echo "" >> size_report.md
-          echo "## 构建配置" >> size_report.md
-          echo "- 目标架构: arm64-v8a" >> size_report.md
-          echo "- 构建类型: ${{ github.event.inputs.build_type }}" >> size_report.md
-          echo "- compileSdk: 36" >> size_report.md
-          echo "- targetSdk: 36" >> size_report.md
-          echo "- minSdk: 29" >> size_report.md
-          echo "" >> size_report.md
-          echo "## APK 信息" >> size_report.md
-          
-          find . -name "*.apk" -type f | while read apk; do
-            size=$(du -h "$apk" | cut -f1)
-            name=$(basename "$apk")
-            echo "- $name: $size" >> size_report.md
-          done
-          
-          cat size_report.md
-      
-      - name: Upload size report
-        uses: actions/upload-artifact@v4
-        with:
-          name: size-report
-          path: ./project/size_report.md
-          retention-days: 7
+          if-no-files-found: error
       
       - name: Upload build logs on failure
         if: failure()
@@ -204,5 +196,6 @@ jobs:
           path: |
             ./project/**/.gradle/console.log
             ./project/**/build/reports/
+            ./project/**/build/outputs/logs/
           retention-days: 7
           if-no-files-found: warn
