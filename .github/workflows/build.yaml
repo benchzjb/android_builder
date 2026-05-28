@@ -51,10 +51,8 @@ jobs:
       - name: Fix Gradle version to 8.11.1
         working-directory: ./project
         run: |
-          # 确保 gradle/wrapper 目录存在
           mkdir -p gradle/wrapper
           
-          # 设置正确的 Gradle 版本
           cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
@@ -65,15 +63,6 @@ jobs:
           
           echo "Gradle 版本已设置为 8.11.1"
           cat gradle/wrapper/gradle-wrapper.properties
-          
-          # 下载对应版本的 gradle-wrapper.jar
-          ./gradlew wrapper --gradle-version 8.11.1 2>/dev/null || {
-            echo "使用内置方法生成 wrapper..."
-            # 如果上面命令失败，尝试用 gradle 命令
-            if command -v gradle &> /dev/null; then
-              gradle wrapper --gradle-version 8.11.1
-            fi
-          }
       
       - name: Configure build.gradle for arm64-v8a only
         working-directory: ./project
@@ -92,11 +81,15 @@ jobs:
           # 检查是否已存在 abiFilters 配置
           if ! grep -q "abiFilters" $APP_BUILD_GRADLE; then
             if [[ "$APP_BUILD_GRADLE" == *.kts ]]; then
-              # Kotlin DSL - 在 defaultConfig 块内添加
-              awk '/defaultConfig {/{print; print "        ndk {"; print "            abiFilters(\"arm64-v8a\")"; print "        }"; next}1' $APP_BUILD_GRADLE > temp.gradle && mv temp.gradle $APP_BUILD_GRADLE
+              # Kotlin DSL - 使用更简单的方法
+              echo '        ndk {' >> $APP_BUILD_GRADLE
+              echo '            abiFilters("arm64-v8a")' >> $APP_BUILD_GRADLE
+              echo '        }' >> $APP_BUILD_GRADLE
             else
               # Groovy DSL
-              awk '/defaultConfig {/{print; print "        ndk {"; print "            abiFilters \"arm64-v8a\""; print "        }"; next}1' $APP_BUILD_GRADLE > temp.gradle && mv temp.gradle $APP_BUILD_GRADLE
+              echo '        ndk {' >> $APP_BUILD_GRADLE
+              echo '            abiFilters "arm64-v8a"' >> $APP_BUILD_GRADLE
+              echo '        }' >> $APP_BUILD_GRADLE
             fi
             echo "已添加 ndk abiFilters 配置"
           else
@@ -112,38 +105,25 @@ jobs:
         run: |
           APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
-          if [[ "$APP_BUILD_GRADLE" == *.kts ]]; then
-            sed -i 's/minifyEnabled = false/minifyEnabled = true/g' $APP_BUILD_GRADLE || true
-            sed -i 's/shrinkResources = false/shrinkResources = true/g' $APP_BUILD_GRADLE || true
-            # 如果没找到，尝试在 buildTypes 块中添加
-            if ! grep -q "minifyEnabled true" $APP_BUILD_GRADLE; then
-              echo "在 Kotlin DSL 中添加混淆配置..."
-              sed -i '/buildTypes {/a\
-        release {\
-            isMinifyEnabled = true\
-            isShrinkResources = true\
-            proguardFiles(\
-                getDefaultProguardFile("proguard-android-optimize.txt"),\
-                "proguard-rules.pro"\
-            )\
-        }\
-' $APP_BUILD_GRADLE
-            fi
-          else
-            sed -i 's/minifyEnabled false/minifyEnabled true/g' $APP_BUILD_GRADLE || true
-            sed -i 's/shrinkResources false/shrinkResources true/g' $APP_BUILD_GRADLE || true
+          # 启用资源压缩和代码混淆
+          if grep -q "minifyEnabled false" $APP_BUILD_GRADLE; then
+            sed -i 's/minifyEnabled false/minifyEnabled true/g' $APP_BUILD_GRADLE
           fi
+          
+          if grep -q "shrinkResources false" $APP_BUILD_GRADLE; then
+            sed -i 's/shrinkResources false/shrinkResources true/g' $APP_BUILD_GRADLE
+          fi
+          
           echo "已为 release 构建启用优化"
       
       - name: Setup Gradle wrapper
         working-directory: ./project
         run: |
           chmod +x gradlew 2>/dev/null || true
-          # 确保 gradlew 存在
           if [ ! -f "gradlew" ]; then
             echo "生成 gradle wrapper..."
-            gradle wrapper --gradle-version 8.11.1
-            chmod +x gradlew
+            gradle wrapper --gradle-version 8.11.1 || true
+            chmod +x gradlew 2>/dev/null || true
           fi
       
       - name: Cache Gradle
@@ -163,18 +143,13 @@ jobs:
           echo "=== 构建环境信息 ==="
           java -version
           echo ""
-          echo "Gradle 版本:"
           ./gradlew --version
           echo ""
           
           echo "开始构建 ${{ github.event.inputs.build_type }} APK (arm64-v8a only)"
           echo ""
           
-          # 添加 JVM 参数解决 Cgroup 问题
-          ./gradlew assemble${{ github.event.inputs.build_type }} \
-            --stacktrace \
-            --no-daemon \
-            -Dorg.gradle.jvmargs="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+          ./gradlew assemble${{ github.event.inputs.build_type }} --stacktrace --no-daemon
           
           echo ""
           echo "=== 生成的 APK 文件 ==="
@@ -196,7 +171,6 @@ jobs:
             echo "✅ APK 已重命名为: $NEW_NAME"
           else
             echo "❌ 未找到 APK 文件"
-            echo "查找构建输出目录:"
             find app/build/outputs -type f 2>/dev/null || echo "无输出"
             exit 1
           fi
@@ -217,8 +191,6 @@ jobs:
           echo "## 构建配置" >> size_report.md
           echo "- 目标架构: arm64-v8a only" >> size_report.md
           echo "- 构建类型: ${{ github.event.inputs.build_type }}" >> size_report.md
-          echo "- AGP 版本: 9.0.1" >> size_report.md
-          echo "- Gradle 版本: 8.11.1" >> size_report.md
           echo "" >> size_report.md
           echo "## APK 信息" >> size_report.md
           
