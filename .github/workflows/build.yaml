@@ -2,6 +2,15 @@ name: android_build
 
 on:
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -9,6 +18,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout the code
         uses: actions/checkout@v4
@@ -35,45 +45,134 @@ jobs:
       - name: Clone project
         run: git clone --depth=1 ${{ steps.get-project.outputs.PROJECT }} project
       
-      - name: Debug project structure
+      - name: Configure build.gradle for arm64-v8a only
         working-directory: ./project
         run: |
-          echo "=== Root directory ==="
-          ls -la
-          echo "=== Build files ==="
-          find . -maxdepth 2 -name "*.gradle*" -type f
-          echo "=== Gradle wrapper ==="
-          ls -la gradlew 2>/dev/null || echo "gradlew not found"
-      
-      - name: Build the app
-        working-directory: ./project
-        run: |
-          # 设置 Gradle 用户主目录
-          export GRADLE_USER_HOME=$HOME/.gradle
+          # 查找 app 模块的 build.gradle 文件
+          APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
-          # 如果没有 gradlew，生成它
-          if [ ! -f "gradlew" ]; then
-            echo "gradlew not found, creating..."
-            gradle wrapper
+          if [ -z "$APP_BUILD_GRADLE" ]; then
+            echo "找不到 app/build.gradle 文件"
+            exit 1
           fi
           
-          # 给执行权限
+          echo "找到文件: $APP_BUILD_GRADLE"
+          
+          # 备份原文件
+          cp $APP_BUILD_GRADLE ${APP_BUILD_GRADLE}.backup
+          
+          # 在 android 块内添加 ndk 配置（只保留 arm64-v8a）
+          if ! grep -q "abiFilters" $APP_BUILD_GRADLE; then
+            sed -i '/defaultConfig {/a\
+        ndk {\
+            abiFilters "arm64-v8a"\
+        }\
+' $APP_BUILD_GRADLE
+            echo "已添加 ndk abiFilters 配置（只保留 arm64-v8a）"
+          else
+            echo "abiFilters 配置已存在"
+          fi
+          
+          # 显示修改后的配置
+          echo "=== 修改后的配置 ==="
+          grep -A 5 "abiFilters" $APP_BUILD_GRADLE || echo "未找到"
+      
+      - name: Enable resource shrinking for release builds
+        working-directory: ./project
+        if: github.event.inputs.build_type == 'release'
+        run: |
+          APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
+          
+          # 启用资源压缩和代码混淆
+          sed -i '/buildTypes {/,/}/ {
+            s/minifyEnabled false/minifyEnabled true/
+            s/shrinkResources false/shrinkResources true/
+          }' $APP_BUILD_GRADLE
+          
+          echo "已为 release 构建启用资源压缩"
+      
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            project/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('project/**/*.gradle*', 'project/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      
+      - name: Build APK for arm64-v8a
+        working-directory: ./project
+        run: |
           chmod +x gradlew
           
-          # 尝试列出可用任务（调试用）
-          echo "=== Available Gradle tasks ==="
-          ./gradlew tasks --all --no-daemon || true
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+            chmod +x gradlew
+          fi
           
-          # 尝试构建
-          echo "=== Building APK ==="
-          ./gradlew assembleDebug --stacktrace --info --no-daemon
+          echo "开始构建 arm64-v8a APK..."
+          ./gradlew assemble${{ github.event.inputs.build_type }} --stacktrace --no-daemon
+          
+          # 列出生成的 APK 文件
+          echo "=== 生成的 APK 文件 ==="
+          find . -name "*.apk" -type f | while read apk; do
+            size=$(du -h "$apk" | cut -f1)
+            echo "$apk - 大小: $size"
+          done
+      
+      - name: Rename APK with architecture info
+        working-directory: ./project
+        run: |
+          # 找到生成的 APK 文件
+          APK_FILE=$(find . -name "*.apk" -type f | grep -v "unaligned" | head -1)
+          
+          if [ -n "$APK_FILE" ]; then
+            APK_DIR=$(dirname "$APK_FILE")
+            # 重命名 APK
+            NEW_NAME="$APK_DIR/app-arm64-v8a-${{ github.event.inputs.build_type }}.apk"
+            mv "$APK_FILE" "$NEW_NAME"
+            echo "APK 已重命名为: $NEW_NAME"
+            echo "APK_PATH=$NEW_NAME" >> $GITHUB_ENV
+          fi
       
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: my-build-apk
+          name: app-arm64-v8a-${{ github.event.inputs.build_type }}
           path: ./project/**/*.apk
+          retention-days: 7
+          compression-level: 0
+      
+      - name: Generate size report
+        working-directory: ./project
+        run: |
+          echo "# APK 体积分析报告" > size_report.md
+          echo "" >> size_report.md
+          echo "## 构建配置" >> size_report.md
+          echo "- **目标架构**: arm64-v8a 仅" >> size_report.md
+          echo "- **构建类型**: ${{ github.event.inputs.build_type }}" >> size_report.md
+          echo "" >> size_report.md
+          echo "## APK 信息" >> size_report.md
+          echo "" >> size_report.md
+          
+          find . -name "*.apk" -type f | while read apk; do
+            size=$(du -h "$apk" | cut -f1)
+            size_mb=$(du -m "$apk" | cut -f1)
+            name=$(basename "$apk")
+            echo "### $name" >> size_report.md
+            echo "- 大小: $size ($size_mb MB)" >> size_report.md
+            echo "" >> size_report.md
+          done
+          
+          cat size_report.md
+      
+      - name: Upload size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: size-report-arm64-v8a
+          path: ./project/size_report.md
           retention-days: 7
       
       - name: Upload build logs on failure
@@ -81,5 +180,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: ./project/**/.gradle/console.log
+          path: |
+            ./project/**/.gradle/console.log
+            ./project/**/build/reports/
           retention-days: 7
