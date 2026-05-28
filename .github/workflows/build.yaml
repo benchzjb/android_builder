@@ -31,15 +31,27 @@ jobs:
       
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platform-tools
-            platforms;android-36
-            build-tools;36.0.0
-      
-      - name: Accept Android licenses
+        
+      - name: Install specific SDK components
         run: |
+          # 更新 sdkmanager
+          yes | sdkmanager --update || true
+          
+          # 安装所需的组件（使用正确的包名格式）
+          echo "安装 Android Platform 36..."
+          yes | sdkmanager "platforms;android-36" || true
+          
+          echo "安装 Build Tools 36.0.0..."
+          yes | sdkmanager "build-tools;36.0.0" || true
+          
+          echo "安装 Platform Tools..."
+          yes | sdkmanager "platform-tools" || true
+          
+          # 接受所有许可证
           yes | sdkmanager --licenses || true
+          
+          echo "已安装的 SDK 组件:"
+          sdkmanager --list | grep -E "platforms|build-tools|platform-tools"
       
       - id: get-project
         name: Get project name
@@ -65,7 +77,6 @@ jobs:
           
           # 检查是否已存在 abiFilters 配置
           if ! grep -q "abiFilters" $APP_BUILD_GRADLE; then
-            # 使用 printf 和 cat 来避免 sed 转义问题
             if [[ "$APP_BUILD_GRADLE" == *.kts ]]; then
               # Kotlin DSL
               awk '/defaultConfig {/{print; print "        ndk {"; print "            abiFilters(\"arm64-v8a\")"; print "        }"; next}1' $APP_BUILD_GRADLE > temp.gradle && mv temp.gradle $APP_BUILD_GRADLE
@@ -124,6 +135,8 @@ jobs:
         run: |
           echo "=== 构建环境信息 ==="
           java -version
+          echo "Android SDK 路径: $ANDROID_HOME"
+          sdkmanager --list | head -20
           ./gradlew --version
           
           echo "开始构建 ${{ github.event.inputs.build_type }} APK"
@@ -192,3 +205,4 @@ jobs:
             ./project/**/.gradle/console.log
             ./project/**/build/reports/
           retention-days: 7
+          if-no-files-found: warn
