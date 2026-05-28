@@ -27,12 +27,11 @@ jobs:
         uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'oracle'  # 使用 Oracle JDK
+          distribution: 'oracle'
       
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # 安装您需要的组件
           packages: |
             platform-tools
             platforms;android-36
@@ -51,10 +50,9 @@ jobs:
       - name: Clone project
         run: git clone --depth=1 ${{ steps.get-project.outputs.PROJECT }} project
       
-      - name: Configure build.gradle for arm64-v8a only (AGP 9.0.1 compatible)
+      - name: Configure build.gradle for arm64-v8a only
         working-directory: ./project
         run: |
-          # 查找 app 模块的 build.gradle 文件
           APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
           if [ -z "$APP_BUILD_GRADLE" ]; then
@@ -63,29 +61,19 @@ jobs:
           fi
           
           echo "找到文件: $APP_BUILD_GRADLE"
-          
-          # 备份原文件
           cp $APP_BUILD_GRADLE ${APP_BUILD_GRADLE}.backup
           
-          # 对于 AGP 9.0.1，在 android 块内添加 ndk 配置
+          # 检查是否已存在 abiFilters 配置
           if ! grep -q "abiFilters" $APP_BUILD_GRADLE; then
-            # 检查是 Groovy 还是 Kotlin DSL
+            # 使用 printf 和 cat 来避免 sed 转义问题
             if [[ "$APP_BUILD_GRADLE" == *.kts ]]; then
-              # Kotlin DSL 语法
-              sed -i '/defaultConfig {/a\
-        ndk {\
-            abiFilters("arm64-v8a")\
-        }\
-' $APP_BUILD_GRADLE
+              # Kotlin DSL
+              awk '/defaultConfig {/{print; print "        ndk {"; print "            abiFilters(\"arm64-v8a\")"; print "        }"; next}1' $APP_BUILD_GRADLE > temp.gradle && mv temp.gradle $APP_BUILD_GRADLE
             else
-              # Groovy DSL 语法
-              sed -i '/defaultConfig {/a\
-        ndk {\
-            abiFilters "arm64-v8a"\
-        }\
-' $APP_BUILD_GRADLE
+              # Groovy DSL
+              awk '/defaultConfig {/{print; print "        ndk {"; print "            abiFilters \"arm64-v8a\""; print "        }"; next}1' $APP_BUILD_GRADLE > temp.gradle && mv temp.gradle $APP_BUILD_GRADLE
             fi
-            echo "已添加 ndk abiFilters 配置（只保留 arm64-v8a）"
+            echo "已添加 ndk abiFilters 配置"
           else
             echo "abiFilters 配置已存在"
           fi
@@ -93,43 +81,29 @@ jobs:
           echo "=== 修改后的配置 ==="
           grep -A 5 "abiFilters" $APP_BUILD_GRADLE || echo "未找到"
       
-      - name: Configure build for release (compatible with AGP 9.0.1)
+      - name: Configure build for release
         working-directory: ./project
         if: github.event.inputs.build_type == 'release'
         run: |
           APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
-          # 检查是 Groovy 还是 Kotlin DSL
+          # 启用资源压缩和代码混淆
           if [[ "$APP_BUILD_GRADLE" == *.kts ]]; then
-            # Kotlin DSL - 使用不同的 sed 模式
-            sed -i '/buildTypes {/,/}/ {
-              s/minifyEnabled = false/minifyEnabled = true/
-              s/shrinkResources = false/shrinkResources = true/
-            }' $APP_BUILD_GRADLE
+            # Kotlin DSL
+            sed -i 's/minifyEnabled = false/minifyEnabled = true/g' $APP_BUILD_GRADLE
+            sed -i 's/shrinkResources = false/shrinkResources = true/g' $APP_BUILD_GRADLE
           else
             # Groovy DSL
-            sed -i '/buildTypes {/,/}/ {
-              s/minifyEnabled false/minifyEnabled true/
-              s/shrinkResources false/shrinkResources true/
-            }' $APP_BUILD_GRADLE
+            sed -i 's/minifyEnabled false/minifyEnabled true/g' $APP_BUILD_GRADLE
+            sed -i 's/shrinkResources false/shrinkResources true/g' $APP_BUILD_GRADLE
           fi
           
-          echo "已为 release 构建启用资源压缩和代码混淆"
+          echo "已为 release 构建启用资源压缩"
       
       - name: Setup Gradle wrapper
         working-directory: ./project
         run: |
-          # 检查 gradle-wrapper.properties 中的 Gradle 版本
-          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "当前 Gradle 版本配置:"
-            cat gradle/wrapper/gradle-wrapper.properties | grep distributionUrl
-          else
-            echo "未找到 gradle-wrapper.properties"
-          fi
-          
-          # 确保 gradlew 存在且可执行
           if [ ! -f "gradlew" ]; then
-            echo "生成 gradle wrapper..."
             gradle wrapper
           fi
           chmod +x gradlew
@@ -149,41 +123,28 @@ jobs:
         working-directory: ./project
         run: |
           echo "=== 构建环境信息 ==="
-          echo "Java 版本:"
           java -version
-          echo "Gradle 版本:"
           ./gradlew --version
           
-          echo ""
-          echo "开始构建 ${{ github.event.inputs.build_type }} APK (arm64-v8a only)..."
+          echo "开始构建 ${{ github.event.inputs.build_type }} APK"
           ./gradlew assemble${{ github.event.inputs.build_type }} --stacktrace --no-daemon
           
-          # 列出生成的 APK 文件
-          echo ""
           echo "=== 生成的 APK 文件 ==="
           find . -name "*.apk" -type f | while read apk; do
             size=$(du -h "$apk" | cut -f1)
-            size_mb=$(du -m "$apk" | cut -f1)
-            echo "📦 $apk"
-            echo "   大小: $size ($size_mb MB)"
+            echo "$apk - 大小: $size"
           done
       
-      - name: Rename APK with architecture info
+      - name: Rename APK
         working-directory: ./project
         run: |
-          # 找到生成的 APK 文件（排除 unaligned 版本）
           APK_FILE=$(find . -name "*.apk" -type f | grep -v "unaligned" | head -1)
           
           if [ -n "$APK_FILE" ]; then
             APK_DIR=$(dirname "$APK_FILE")
-            # 重命名 APK
             NEW_NAME="$APK_DIR/app-arm64-v8a-${{ github.event.inputs.build_type }}.apk"
             mv "$APK_FILE" "$NEW_NAME"
-            echo "✅ APK 已重命名为: $NEW_NAME"
-            echo "APK_PATH=$NEW_NAME" >> $GITHUB_ENV
-          else
-            echo "❌ 未找到 APK 文件"
-            exit 1
+            echo "APK 已重命名为: $NEW_NAME"
           fi
       
       - name: Upload APK
@@ -192,58 +153,33 @@ jobs:
           name: app-arm64-v8a-${{ github.event.inputs.build_type }}
           path: ./project/**/app-arm64-v8a-*.apk
           retention-days: 7
-          compression-level: 0
       
-      - name: Generate detailed size report
+      - name: Generate size report
         working-directory: ./project
         run: |
           echo "# APK 体积分析报告" > size_report.md
           echo "" >> size_report.md
-          echo "## 🏗️ 构建环境" >> size_report.md
-          echo "| 组件 | 版本 |" >> size_report.md
-          echo "|------|------|" >> size_report.md
-          echo "| 操作系统 | ubuntu-latest |" >> size_report.md
-          echo "| JDK | Oracle JDK 17.0.1 x64 |" >> size_report.md
-          echo "| Android SDK | platform-tools, android-36, build-tools 36.0.0 |" >> size_report.md
-          echo "| Gradle | 9.4.0-milestone-3 |" >> size_report.md
-          echo "| AGP | 9.0.1 |" >> size_report.md
-          echo "| Kotlin | 2.2.10 |" >> size_report.md
+          echo "## 构建配置" >> size_report.md
+          echo "- 目标架构: arm64-v8a" >> size_report.md
+          echo "- 构建类型: ${{ github.event.inputs.build_type }}" >> size_report.md
+          echo "- compileSdk: 36" >> size_report.md
+          echo "- targetSdk: 36" >> size_report.md
+          echo "- minSdk: 29" >> size_report.md
           echo "" >> size_report.md
-          echo "## 📱 应用配置" >> size_report.md
-          echo "| 参数 | 值 |" >> size_report.md
-          echo "|------|-----|" >> size_report.md
-          echo "| compileSdk | 36 |" >> size_report.md
-          echo "| targetSdk | 36 |" >> size_report.md
-          echo "| minSdk | 29 |" >> size_report.md
-          echo "| 目标架构 | arm64-v8a only |" >> size_report.md
-          echo "| 构建类型 | ${{ github.event.inputs.build_type }} |" >> size_report.md
-          echo "" >> size_report.md
-          echo "## 📦 APK 信息" >> size_report.md
-          echo "" >> size_report.md
+          echo "## APK 信息" >> size_report.md
           
           find . -name "*.apk" -type f | while read apk; do
             size=$(du -h "$apk" | cut -f1)
-            size_mb=$(du -m "$apk" | cut -f1)
             name=$(basename "$apk")
-            echo "### $name" >> size_report.md
-            echo "- 大小: **$size** ($size_mb MB)" >> size_report.md
-            echo "" >> size_report.md
+            echo "- $name: $size" >> size_report.md
           done
-          
-          # 添加体积对比
-          echo "## 📊 体积对比" >> size_report.md
-          echo "" >> size_report.md
-          echo "假设原始 APK 为 165M（包含所有架构）：" >> size_report.md
-          echo "- 原始大小: 165 MB" >> size_report.md
-          echo "- arm64-v8a 版本: 预计减少 50-70%" >> size_report.md
-          echo "" >> size_report.md
           
           cat size_report.md
       
       - name: Upload size report
         uses: actions/upload-artifact@v4
         with:
-          name: size-report-arm64-v8a
+          name: size-report
           path: ./project/size_report.md
           retention-days: 7
       
@@ -255,13 +191,4 @@ jobs:
           path: |
             ./project/**/.gradle/console.log
             ./project/**/build/reports/
-            ./project/**/build/outputs/logs/
-          retention-days: 7
-      
-      - name: Upload test results (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: ./project/**/build/reports/tests/
           retention-days: 7
