@@ -2,39 +2,19 @@ name: android_build
 
 on:
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: '构建类型'
-        required: true
-        default: 'release'
-        type: choice
-        options:
-          - debug
-          - release
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout the code
         uses: actions/checkout@v4
       
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v3
         with:
-          java-version: '17'
+          java-version: '11'
           distribution: 'temurin'
-      
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      
-      - name: Accept Android licenses
-        run: |
-          yes | sdkmanager --licenses || true
       
       - id: get-project
         name: Get project name
@@ -45,132 +25,20 @@ jobs:
       - name: Clone project
         run: git clone --depth=1 ${{ steps.get-project.outputs.PROJECT }} project
       
-      - name: Configure build.gradle for arm64-v8a only
+      - name: Build the app (Release)
         working-directory: ./project
         run: |
-          APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
-          
-          if [ -z "$APP_BUILD_GRADLE" ]; then
-            echo "找不到 app/build.gradle 文件"
-            exit 1
-          fi
-          
-          echo "找到文件: $APP_BUILD_GRADLE"
-          
-          cp $APP_BUILD_GRADLE ${APP_BUILD_GRADLE}.backup
-          
-          if ! grep -q "abiFilters" $APP_BUILD_GRADLE; then
-            sed -i '/defaultConfig {/a\
-        ndk {\
-            abiFilters "arm64-v8a"\
-        }\
-' $APP_BUILD_GRADLE
-            echo "已添加 ndk abiFilters 配置（只保留 arm64-v8a）"
-          else
-            echo "abiFilters 配置已存在"
-          fi
-          
-          echo "=== 修改后的配置 ==="
-          grep -A 5 "abiFilters" $APP_BUILD_GRADLE || echo "未找到"
-      
-      - name: Enable resource shrinking for release builds
-        working-directory: ./project
-        if: github.event.inputs.build_type == 'release'
-        run: |
-          APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
-          
-          sed -i '/buildTypes {/,/}/ s/minifyEnabled false/minifyEnabled true/' $APP_BUILD_GRADLE
-          sed -i '/buildTypes {/,/}/ s/shrinkResources false/shrinkResources true/' $APP_BUILD_GRADLE
-          
-          echo "已为 release 构建启用资源压缩"
-      
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            project/.gradle
-          key: ${{ runner.os }}-gradle-${{ hashFiles('project/**/*.gradle*', 'project/**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-      
-      - name: Build APK for arm64-v8a
-        working-directory: ./project
-        run: |
-          chmod +x gradlew
-          
           if [ ! -f "gradlew" ]; then
+            chmod +x gradle
             gradle wrapper
-            chmod +x gradlew
           fi
-          
-          echo "开始构建 arm64-v8a APK..."
-          ./gradlew assemble${{ github.event.inputs.build_type }} --stacktrace --no-daemon
-          
-          echo "=== 生成的 APK 文件 ==="
-          find . -name "*.apk" -type f | while read apk; do
-            size=$(du -h "$apk" | cut -f1)
-            echo "$apk - 大小: $size"
-          done
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
       
-      - name: Rename APK with architecture info
-        working-directory: ./project
-        run: |
-          APK_FILE=$(find . -name "*.apk" -type f | grep -v "unaligned" | head -1)
-          
-          if [ -n "$APK_FILE" ]; then
-            APK_DIR=$(dirname "$APK_FILE")
-            NEW_NAME="$APK_DIR/app-arm64-v8a-${{ github.event.inputs.build_type }}.apk"
-            mv "$APK_FILE" "$NEW_NAME"
-            echo "APK 已重命名为: $NEW_NAME"
-            echo "APK_PATH=$NEW_NAME" >> $GITHUB_ENV
-          fi
-      
-      - name: Upload APK
+      - name: Find and upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-arm64-v8a-${{ github.event.inputs.build_type }}
-          path: ./project/**/*.apk
-          retention-days: 7
-          compression-level: 0
-      
-      - name: Generate size report
-        working-directory: ./project
-        run: |
-          echo "# APK 体积分析报告" > size_report.md
-          echo "" >> size_report.md
-          echo "## 构建配置" >> size_report.md
-          echo "- **目标架构**: arm64-v8a 仅" >> size_report.md
-          echo "- **构建类型**: ${{ github.event.inputs.build_type }}" >> size_report.md
-          echo "" >> size_report.md
-          echo "## APK 信息" >> size_report.md
-          echo "" >> size_report.md
-          
-          find . -name "*.apk" -type f | while read apk; do
-            size=$(du -h "$apk" | cut -f1)
-            size_mb=$(du -m "$apk" | cut -f1)
-            name=$(basename "$apk")
-            echo "### $name" >> size_report.md
-            echo "- 大小: $size ($size_mb MB)" >> size_report.md
-            echo "" >> size_report.md
-          done
-          
-          cat size_report.md
-      
-      - name: Upload size report
-        uses: actions/upload-artifact@v4
-        with:
-          name: size-report-arm64-v8a
-          path: ./project/size_report.md
-          retention-days: 7
-      
-      - name: Upload build logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
+          name: release-apk
           path: |
-            ./project/**/.gradle/console.log
-            ./project/**/build/reports/
-          retention-days: 7
+            ./project/app/build/outputs/apk/release/*.apk
+            ./project/*/build/outputs/apk/release/*.apk
