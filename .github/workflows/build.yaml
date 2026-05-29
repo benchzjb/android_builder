@@ -84,10 +84,7 @@ jobs:
           APP_BUILD_GRADLE=$(find . -path "*/app/build.gradle" -o -path "*/app/build.gradle.kts" | head -1)
           
           # 启用资源压缩和代码混淆
-          sed -i '/buildTypes {/,/}/ {
-            s/minifyEnabled false/minifyEnabled true/
-            s/shrinkResources false/shrinkResources true/
-          }' $APP_BUILD_GRADLE
+          sed -i -e '/buildTypes {/,/}/ s/minifyEnabled false/minifyEnabled true/' -e '/buildTypes {/,/}/ s/shrinkResources false/shrinkResources true/' $APP_BUILD_GRADLE
           
           echo "已为 release 构建启用资源压缩"
       
