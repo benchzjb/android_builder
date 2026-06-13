@@ -13,7 +13,7 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
-          java-version: '17'
+          java-version: '11'
           distribution: 'temurin'
       
       - id: get-project
@@ -25,7 +25,7 @@ jobs:
       - name: Clone project
         run: git clone --depth=1 ${{ steps.get-project.outputs.PROJECT }} project
       
-      - name: Build the app (Release)
+      - name: Build the app
         working-directory: ./project
         run: |
           if [ ! -f "gradlew" ]; then
@@ -33,12 +33,10 @@ jobs:
             gradle wrapper
           fi
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
+          ./gradlew assembleDebug --stacktrace
       
-      - name: Find and upload Release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: |
-            ./project/app/build/outputs/apk/release/*.apk
-            ./project/*/build/outputs/apk/release/*.apk
+          name: my-build-apk
+          path: ./**/*.apk
